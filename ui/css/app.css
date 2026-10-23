@@ -302,6 +302,8 @@ select:disabled { opacity: .45; }
   color: var(--accent);
   font-size: 10px;
   font-weight: 700;
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
 }
 .app-mini svg { width: 12px; height: 12px; }
 .system-hint {
@@ -835,6 +837,8 @@ select:disabled { opacity: .45; }
   color: #fff;
   font-size: 12px;
   font-weight: 700;
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
 }
 .app-name { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .app-sub { color: var(--muted); font-size: 10.5px; }

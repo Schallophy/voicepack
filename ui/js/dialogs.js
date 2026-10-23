@@ -41,6 +41,7 @@ export async function openAppPicker(app) {
     sub: def.sub || '',
     pid: def.pid ?? null,
     bufferKey: def.bufferKey ?? null,
+    icon: def.icon || '',
     color: def.color || appColor(def.name || '应'),
     initial: def.initial || (def.name || '应').slice(0, 1).toUpperCase(),
     index,
@@ -57,8 +58,12 @@ export async function openAppPicker(app) {
 
     const mark = document.createElement('span');
     mark.className = 'app-icon';
-    mark.style.background = def.color;
-    mark.textContent = def.initial;
+    if (def.icon) {
+      mark.style.backgroundImage = `url("${def.icon}")`;
+    } else {
+      mark.style.background = def.color;
+      mark.textContent = def.initial;
+    }
 
     const info = document.createElement('span');
     const name = document.createElement('span');

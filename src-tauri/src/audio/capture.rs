@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use micdeck_lib::platform::{Capture, Endpoint, OnFrames, Source, StreamOptions};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -43,13 +44,15 @@ pub struct CaptureSession {
     started: Instant,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceInfo {
     pub id: String,
     pub name: String,
     pub sub: String,
     pub pid: Option<u32>,
+    /// The process's own icon as a `data:` URL; empty when the shell has none to give.
+    pub icon: String,
 }
 
 fn endpoint_rows(dir: micdeck_lib::platform::Direction) -> Vec<Endpoint> {
@@ -64,7 +67,7 @@ pub fn list_input_devices() -> Vec<SourceInfo> {
             id: ep.id,
             name: ep.name,
             sub: if ep.is_default { "默认输入".into() } else { String::new() },
-            pid: None,
+            ..Default::default()
         })
         .collect()
 }
@@ -77,7 +80,7 @@ pub fn list_output_devices() -> Vec<SourceInfo> {
             id: ep.id,
             name: ep.name,
             sub: if ep.is_default { "默认输出".into() } else { String::new() },
-            pid: None,
+            ..Default::default()
         })
         .collect()
 }
@@ -93,8 +96,19 @@ pub fn list_app_sources() -> Vec<SourceInfo> {
             name: row.name,
             sub: row.title,
             pid: Some(row.pid),
+            icon: process_icon(row.pid),
         })
         .collect()
+}
+
+/// micdeck answers with a 1×1 transparent PNG when it finds nothing, so only its
+/// `.ico` payloads count as a real icon; the front end keeps the letter tile otherwise.
+fn process_icon(pid: u32) -> String {
+    let icon = micdeck_lib::platform::icon_for_pid(pid);
+    if icon.mime != "image/x-icon" {
+        return String::new();
+    }
+    format!("data:{};base64,{}", icon.mime, STANDARD.encode(&icon.bytes))
 }
 
 fn resolve_source(mode: &str, device: Option<String>, pid: Option<u32>) -> Result<Source, String> {

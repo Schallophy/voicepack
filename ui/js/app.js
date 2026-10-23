@@ -387,15 +387,19 @@ export class App {
     this.dom.appPickBtn.disabled = busy;
     for (const btn of $$('.seg-btn', this.dom.sourceSeg)) btn.disabled = busy;
 
+    const mini = this.dom.appMini;
     if (this.appSource) {
-      this.dom.appMini.textContent = this.appSource.initial || '应';
-      this.dom.appMini.style.background = this.appSource.color || 'var(--accent-soft)';
-      this.dom.appMini.style.color = '#fff';
+      const icon = this.appSource.icon;
+      mini.textContent = icon ? '' : (this.appSource.initial || '应');
+      mini.style.background = icon ? 'none' : (this.appSource.color || 'var(--accent-soft)');
+      mini.style.backgroundImage = icon ? `url("${icon}")` : '';
+      mini.style.color = '#fff';
       this.dom.appPickLabel.textContent = this.appSource.name;
     } else {
-      this.dom.appMini.textContent = '';
-      this.dom.appMini.style.background = 'var(--accent-soft)';
-      this.dom.appMini.style.color = 'var(--accent)';
+      mini.textContent = '';
+      mini.style.background = 'var(--accent-soft)';
+      mini.style.backgroundImage = '';
+      mini.style.color = 'var(--accent)';
       this.dom.appPickLabel.textContent = '选择应用';
     }
   }
