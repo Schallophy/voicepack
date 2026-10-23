@@ -5,7 +5,6 @@ const solid = (body, viewBox = '0 0 24 24') =>
   `<svg viewBox="${viewBox}" fill="currentColor" aria-hidden="true">${body}</svg>`;
 
 export const ICONS = {
-  wave: stroke('<path d="M3 12h1.5M7 8.5v7M11 5v14M15 9v6M19 7.5v9M22 12h-1"/>'),
   play: solid('<path d="M8 5.2c0-.8.9-1.3 1.6-.9l9.1 5.8c.7.4.7 1.4 0 1.8l-9.1 5.8c-.7.4-1.6-.1-1.6-.9V5.2z"/>'),
   pause: solid('<rect x="7" y="5" width="3.4" height="14" rx="1"/><rect x="13.6" y="5" width="3.4" height="14" rx="1"/>'),
   stop: solid('<rect x="6.5" y="6.5" width="11" height="11" rx="2"/>'),

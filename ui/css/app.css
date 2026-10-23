@@ -35,22 +35,8 @@ svg { display: block; }
   gap: 20px;
   padding: 0 24px;
 }
-.brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
-.brand-mark {
-  width: 30px; height: 30px; border-radius: 9px;
-  display: grid; place-items: center;
-  background: var(--accent); color: var(--accent-ink);
-  box-shadow: var(--shadow-sm);
-}
-.brand-mark svg { width: 18px; height: 18px; }
-.brand-text { display: flex; align-items: center; gap: 10px; min-width: 0; }
-h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: .2px; }
-.session-chip {
-  padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px;
-  background: var(--panel); color: var(--muted); font-size: 11.5px; white-space: nowrap;
-}
 .top-actions { display: flex; align-items: center; gap: 10px; }
-.view-switch { flex: none; padding: 3px; }
+.view-switch { flex: none; padding: 3px; margin-inline: auto; }
 .view-switch .seg-btn { height: 28px; padding: 0 13px; font-size: 12.5px; }
 .output-field { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
 .output-field select { max-width: 220px; }
@@ -948,7 +934,6 @@ select:disabled { opacity: .45; }
 @media (max-width: 760px) {
   .topbar { padding: 0 14px; gap: 10px; }
   .workspace { padding: 0 14px 14px; gap: 12px; }
-  .session-chip { display: none; }
   .output-field > span { display: none; }
   .view-switch .seg-btn { padding: 0 9px; font-size: 12px; }
   .recorder { flex-wrap: wrap; }
