@@ -359,7 +359,7 @@ export class App {
     const options = this.packs.map((pack) => {
       const el = document.createElement('option');
       el.value = pack.id;
-      el.textContent = `${pack.name} · ${(this.voicesByPack.get(pack.id) || []).length} 条`;
+      el.textContent = pack.name;
       return el;
     });
     select.replaceChildren(...options);
