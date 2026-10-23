@@ -111,6 +111,7 @@ export async function openAppPicker(app) {
 
   let last = 0;
   let raf = 0;
+  if (!isNative) app.ensureDemoBuffers();
   const tick = (now) => {
     if (!modal.panel.isConnected) return;
     if (now - last > 66) {

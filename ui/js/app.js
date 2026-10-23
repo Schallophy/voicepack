@@ -100,7 +100,7 @@ export class App {
       requestAnimationFrame(() => this.syncCanvasTheme());
     });
 
-    this.seedDemoData();
+    this.seedInitialState();
     this.wireEvents();
     this.renderTargetPacks();
     this.renderAssetCounts();
@@ -151,25 +151,17 @@ export class App {
    * seed + data helpers
    * ======================================================= */
 
-  seedDemoData() {
-    const ctx = this.engine.context();
-    this.demo = makeDemoBuffers(ctx);
+  seedInitialState() {
     const pack = { id: uid(), name: '默认语音包', createdAt: Date.now() };
     this.packs.push(pack);
     this.packId = pack.id;
     this.voicesByPack.set(pack.id, []);
+  }
 
-    const chime = this.buildAsset({ name: '示例 · 提示音', buffer: this.demo.chime, createdAt: Date.now() - 2000 });
-    const speech = this.buildAsset({ name: '示例 · 短句', buffer: this.demo.speech, createdAt: Date.now() - 1000 });
-    this.assets.push(chime, speech);
-
-    const sr = speech.buffer.sampleRate;
-    const slice = keepRenderedRange(speech.segments, Math.round(0.76 * sr), Math.round(1.62 * sr));
-    this.voicesByPack.set(pack.id, [
-      this.buildVoice({ name: '示例语音 · 提示音', buffer: chime.buffer, segments: chime.segments }),
-      this.buildVoice({ name: '示例语音 · 短句', buffer: speech.buffer, segments: speech.segments }),
-      this.buildVoice({ name: '示例语音 · 短句（截取）', buffer: speech.buffer, segments: slice }),
-    ]);
+  /// 浏览器回退里的「应用音频」用合成演示音源；桌面版用不到，所以按需构建。
+  ensureDemoBuffers() {
+    if (!this.demo) this.demo = makeDemoBuffers(this.engine.context());
+    return this.demo;
   }
 
   currentPack() {
@@ -1767,7 +1759,7 @@ export class App {
         native: isNative,
         deviceId: this.micDeviceId || undefined,
         pid: isNative && this.sourceMode === 'app' ? this.appSource?.pid : undefined,
-        demoBuffer: mode === 'demo' ? this.demo?.[this.appSource.bufferKey] : null,
+        demoBuffer: mode === 'demo' ? this.ensureDemoBuffers()[this.appSource.bufferKey] : null,
         demoName: sourceName,
         nativeName: sourceName,
         onLevel,
