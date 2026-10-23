@@ -21,6 +21,7 @@ import {
   openAppPicker, openExportClipDialog, openAbout, openPackMenu, openAssetMenu, openVoiceMenu,
 } from './dialogs.js';
 import { isNative, invoke, listen, toNativePcm } from './native.js';
+import { SessionStore } from './session.js';
 
 const ROW_H = 52;
 const MIN_REMAIN_SECONDS = 0.02;
@@ -64,6 +65,7 @@ export class App {
     this.voicePlay = null;
     this.voicePlayToken = 0;
     this.history = new Map();
+    this.session = new SessionStore(this);
     this._busyExporting = false;
     this._busyImporting = false;
     this._listRaf = 0;
@@ -101,6 +103,7 @@ export class App {
     });
 
     this.seedInitialState();
+    const restored = await this.session.restore();
     this.wireEvents();
     this.renderTargetPacks();
     this.renderAssetCounts();
@@ -119,6 +122,13 @@ export class App {
     if (initial) this.selectAsset(initial.id, { initial: true, scroll: false });
 
     await this.refreshDevices();
+    this.session.start();
+    if (restored && (restored.assets || restored.voices)) {
+      const missing = restored.dropped ? `，${restored.dropped} 项音频缺失已跳过` : '';
+      showToast(`已恢复上次的 ${restored.assets} 段素材 / ${restored.voices} 条语音${missing}`, { duration: 3600 });
+    } else if (restored?.dropped) {
+      showToast(`${restored.dropped} 项音频缺失，已跳过`, { type: 'error', duration: 3600 });
+    }
     this._initialized = true;
   }
 
@@ -203,21 +213,21 @@ export class App {
       || this._busyExporting || this._busyImporting;
   }
 
-  buildAsset({ name, buffer, createdAt = Date.now() }) {
+  buildAsset({ id = uid(), name, buffer, createdAt = Date.now(), segments = null }) {
     if (!buffer || !buffer.length) throw new Error('音频为空');
-    const segments = fullSegments(buffer.length);
+    const cuts = segments && segments.length ? normalizeSegments(segments, buffer.length) : fullSegments(buffer.length);
     let renderBuffer;
     try {
-      renderBuffer = this.engine.renderSegments(buffer, segments);
+      renderBuffer = this.engine.renderSegments(buffer, cuts);
     } catch {
       renderBuffer = buffer;
     }
     return {
-      id: uid(),
+      id,
       name: String(name || '未命名素材').slice(0, 60),
       createdAt,
       buffer,
-      segments,
+      segments: cuts,
       renderBuffer,
       duration: renderBuffer.duration,
       gainDb: 0,
@@ -233,7 +243,7 @@ export class App {
 
   // 语音是独立个体：自带渲染好的 PCM，素材之后被删除也不影响它。
   buildVoice({
-    name, buffer, segments = null, gainDb = 0, fadeInMs = 0, fadeOutMs = 0,
+    id = uid(), name, buffer, segments = null, gainDb = 0, fadeInMs = 0, fadeOutMs = 0,
     hotkey = '', createdAt = Date.now(), packId = this.packId,
   }) {
     if (!buffer || !buffer.length) throw new Error('音频为空');
@@ -1938,6 +1948,48 @@ export class App {
     this.renderTargetPacks();
   }
 
+  /// 「清空整个会话」：内存和本机副本一起回到刚装好的样子。没有撤销，所以先确认。
+  async clearSession() {
+    if (this.isBusy()) {
+      showToast('正在录制或处理，稍后再试', { type: 'error' });
+      return;
+    }
+    const assets = this.assets.length;
+    const voices = [...this.voicesByPack.values()].reduce((sum, list) => sum + list.length, 0);
+    if (!assets && !voices) {
+      showToast('当前会话已经是空的');
+      return;
+    }
+    const ok = await confirmDialog({
+      title: '清空整个会话',
+      message: `将删除 ${assets} 段素材和 ${voices} 条语音，连同本机已保存的副本。这一步不能撤销。`,
+      confirmLabel: '清空',
+      danger: true,
+    });
+    if (!ok) return;
+    this.stopAll();
+    this.assets = [];
+    this.asset = null;
+    this.selectedAssetId = null;
+    this.waveAsset = null;
+    this.history = new Map();
+    const pack = { id: uid(), name: '默认语音包', createdAt: Date.now() };
+    this.packs = [pack];
+    this.packId = pack.id;
+    this.voicesByPack = new Map([[pack.id, []]]);
+    try {
+      await this.session.clear();
+    } catch (err) {
+      showToast(`界面已清空，但本机副本没删掉：${err?.message || err}`, { type: 'error', duration: 6000 });
+    }
+    this.renderTargetPacks();
+    this.renderAssetList();
+    this.renderBoard();
+    this.updateControls();
+    this.setView('edit');
+    showToast('会话已清空');
+  }
+
   pickPackFile() {
     if (this.isBusy()) return;
     this.dom.packInput.value = '';
@@ -2667,7 +2719,13 @@ export class App {
     }
     if (mod && lower === 's') {
       event.preventDefault();
-      showToast('内容只保存在内存里，不会自动写入文件', { duration: 4000 });
+      if (!isNative) {
+        showToast('浏览器回退不落盘，请用「导出语音包」', { duration: 4000 });
+        return;
+      }
+      this.session.flush()
+        .then(() => showToast('已保存到本机', { duration: 1600 }))
+        .catch((err) => showToast(`保存失败：${err?.message || err}`, { type: 'error', duration: 5000 }));
       return;
     }
     if (mod && lower === 'e') {

@@ -210,16 +210,27 @@ export function openExportClipDialog(app, entity) {
   return modal;
 }
 
-export function openAbout() {
+export function openAbout(app) {
   const body = document.createElement('div');
 
   const summary = document.createElement('div');
   summary.className = 'summary';
-  summary.textContent = '素材、语音和语音包都只保存在当前会话的内存里：不自动写盘、不上传；只有你明确导出时才会生成文件。';
+  summary.textContent = isNative
+    ? '素材和语音改完就存，不需要手动保存，也不会因为关掉软件而丢失。全部留在本机，不联网、不上传。'
+    : '浏览器回退不落盘：关掉页面就清空，要留下内容请用「导出语音包」。';
   body.appendChild(summary);
 
+  const where = document.createElement('p');
+  where.className = 'hint';
+  body.appendChild(where);
+  if (isNative) {
+    invoke('session_stats').then((stats) => {
+      where.textContent = `保存位置：${stats.dir} · ${stats.blobs} 段音频 · ${(stats.bytes / 1048576).toFixed(1)} MB`;
+    }).catch(() => {});
+  }
+
   const model = document.createElement('p');
-  model.textContent = '素材是原始录音或导入音频；编辑素材不会改母带。把整段或选区保存为语音后，这条语音就成为独立个体，和素材再无关联，之后删素材也不影响它；语音包只负责把语音分组。';
+  model.textContent = '素材是原始录音或导入音频；编辑素材不会改母带。把整段或选区保存为语音后，这条语音就成为独立个体，和素材再无关联，之后删素材也不影响它；语音包只负责把语音分组。导出/导入语音包是给人用的分发格式（zip，每条语音一个 WAV），与自己的备份无关。';
   body.appendChild(model);
 
   return openModal({
@@ -231,6 +242,7 @@ export function openAbout() {
 
 export function openPackMenu(app, anchor) {
   const hasVoices = app.currentVoices().length > 0;
+  const isEmpty = !app.assets.length && [...app.voicesByPack.values()].every((list) => !list.length);
   const packs = app.packs.map((pack) => ({
     label: pack.name,
     icon: pack.id === app.packId ? 'check' : 'folder',
@@ -247,6 +259,7 @@ export function openPackMenu(app, anchor) {
     { label: '导出当前语音包…', icon: 'download', disabled: !hasVoices || app.isBusy(), onClick: () => app.exportPack() },
     { separator: true },
     { label: '删除当前语音包', icon: 'trash', danger: true, disabled: app.packs.length <= 1 || app.isBusy(), onClick: () => app.deleteCurrentPack() },
+    { label: '清空整个会话…', icon: 'trash', danger: true, disabled: isEmpty || app.isBusy(), onClick: () => app.clearSession() },
   ]);
 }
 
