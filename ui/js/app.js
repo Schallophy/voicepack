@@ -1254,7 +1254,7 @@ export class App {
    * saving voices from an asset
    * ======================================================= */
 
-  saveVoiceFromAsset({ assetId = null, selectionOnly = false } = {}) {
+  async saveVoiceFromAsset({ assetId = null, selectionOnly = false } = {}) {
     const asset = this.findAsset(assetId) || this.asset;
     if (!asset || this.isBusy()) return;
     const packId = this.packId || this.packs[0]?.id;
@@ -1279,10 +1279,23 @@ export class App {
       return;
     }
 
+    // 命名放在保存这一刻：省掉"先落一个默认名、再去语音板里找出来改名"的往返。
+    const siblings = this.voicesByPack.get(packId) || [];
+    const name = await promptDialog({
+      title: selectionOnly ? '保存选区为语音' : '保存整段为语音',
+      label: '名称',
+      value: this.uniqueVoiceName(asset.name, packId),
+      confirmLabel: '保存',
+      validate: (v) => (!v
+        ? '名称不能为空'
+        : (siblings.some((x) => x.name.toLowerCase() === v.toLowerCase()) ? '这个语音包里已有同名语音' : '')),
+    });
+    if (!name) return;
+
     let voice;
     try {
       voice = this.buildVoice({
-        name: this.uniqueVoiceName(asset.name, packId),
+        name,
         buffer: asset.buffer,
         segments,
         gainDb: asset.gainDb,
