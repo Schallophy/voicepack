@@ -277,6 +277,7 @@ export function openMenu(anchor, items) {
       btn.appendChild(wrap);
     }
     const label = document.createElement('span');
+    label.className = 'menu-label';
     label.textContent = item.label;
     btn.appendChild(label);
     if (item.shortcut) {

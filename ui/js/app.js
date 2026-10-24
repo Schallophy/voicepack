@@ -1,6 +1,6 @@
 import {
-  $$, clamp, uid, fmtDuration, fmtShort, fmtRate, channelLabel, sanitizeFilename,
-  downloadBlob, isTypingTarget, matchHotkey, deepCopySegments, peakDb,
+  $$, clamp, uid, fmtDuration, fmtShort, fmtRate, channelLabel,
+  isTypingTarget, matchHotkey, deepCopySegments, peakDb, downloadBlob,
 } from './util.js';
 import { hydrateIcons, icon } from './icons.js';
 import { AudioEngine, peakOf, gainForDb } from './audio.js';
@@ -13,14 +13,14 @@ import {
   normalizeSegments, totalLength, keepRenderedRange, removeRenderedRange,
   segmentsEqual, fullSegments, findAudibleBounds,
 } from './edits.js';
-import { createZip, readZip } from './zip.js';
 import {
-  showToast, confirmDialog, promptDialog, PeakMeter, LiveWave,
+  showToast, confirmDialog, promptDialog, openMenu, PeakMeter, LiveWave,
 } from './ui.js';
 import {
   openAppPicker, openExportClipDialog, openAbout, openPackMenu, openAssetMenu, openVoiceMenu,
 } from './dialogs.js';
 import { isNative, invoke, listen, toNativePcm } from './native.js';
+import { packs as packStore, sanitizeName, voiceFile, voiceKey, DEFAULT_PACK } from './packs.js';
 import { SessionStore } from './session.js';
 
 const ROW_H = 52;
@@ -36,8 +36,9 @@ export class App {
     this.recorder = new Recorder(this.engine);
     this.dom = {};
     this.packs = [];
-    this.packId = null;
-    this.voicesByPack = new Map();
+    this.packName = '';
+    this.voices = [];
+    this.hotkeys = {};
     this.assets = [];
     this.asset = null;
     this.selectedAssetId = null;
@@ -102,8 +103,8 @@ export class App {
       requestAnimationFrame(() => this.syncCanvasTheme());
     });
 
-    this.seedInitialState();
     const restored = await this.session.restore();
+    await this.scanPacks();
     this.wireEvents();
     this.renderTargetPacks();
     this.renderAssetCounts();
@@ -123,11 +124,11 @@ export class App {
 
     await this.refreshDevices();
     this.session.start();
-    if (restored && (restored.assets || restored.voices)) {
-      const missing = restored.dropped ? `，${restored.dropped} 项音频缺失已跳过` : '';
-      showToast(`已恢复上次的 ${restored.assets} 段素材 / ${restored.voices} 条语音${missing}`, { duration: 3600 });
-    } else if (restored?.dropped) {
-      showToast(`${restored.dropped} 项音频缺失，已跳过`, { type: 'error', duration: 3600 });
+    if (restored?.assets) {
+      showToast(`已恢复上次的 ${restored.assets} 段素材`, { duration: 3200 });
+    }
+    if (restored?.dropped) {
+      showToast(`${restored.dropped} 段素材的音频缺失，已跳过`, { type: 'error', duration: 3600 });
     }
     this._initialized = true;
   }
@@ -146,7 +147,7 @@ export class App {
       'normalizeBtn', 'silenceBtn', 'resetBtn', 'editWarning', 'exportBtn', 'saveWholeBtn', 'saveSelBtn',
       'boardPackBtn', 'boardPackName', 'boardCount', 'boardSearch', 'layoutToggle',
       'voiceGrid', 'boardEmpty', 'boardEmptyTitle', 'boardEmptyText', 'boardEmptyAction',
-      'outputSelect', 'aboutBtn', 'fileInput', 'packInput', 'dropVeil', 'toastRoot', 'modalRoot',
+      'outputSelect', 'aboutBtn', 'fileInput', 'dropVeil', 'toastRoot', 'modalRoot',
     ];
     for (const id of ids) this.dom[id] = document.getElementById(id);
   }
@@ -158,14 +159,57 @@ export class App {
   }
 
   /* =========================================================
-   * seed + data helpers
+   * packs and voices come from the directory; assets come from the session
    * ======================================================= */
 
-  seedInitialState() {
-    const pack = { id: uid(), name: '默认语音包', createdAt: Date.now() };
-    this.packs.push(pack);
-    this.packId = pack.id;
-    this.voicesByPack.set(pack.id, []);
+  /// 语音包 = 根目录下的一个文件夹。启动、重新聚焦、手动刷新都走这里，外部改动也能看见。
+  async scanPacks() {
+    let rows = [];
+    try {
+      rows = await packStore.listPacks();
+    } catch (err) {
+      showToast(`读不了语音包目录：${err?.message || err}`, { type: 'error', duration: 6000 });
+      return false;
+    }
+    if (!rows.length) {
+      try {
+        await packStore.createPack(DEFAULT_PACK);
+        rows = [{ name: DEFAULT_PACK, voices: 0 }];
+      } catch (err) {
+        showToast(`建不了默认语音包：${err?.message || err}`, { type: 'error', duration: 6000 });
+      }
+    }
+    this.packs = rows;
+    if (!rows.some((pack) => pack.name === this.packName)) this.packName = rows[0]?.name || '';
+    await this.scanVoices();
+    return true;
+  }
+
+  async scanVoices() {
+    if (!this.packName) {
+      this.voices = [];
+      return;
+    }
+    try {
+      this.voices = await packStore.listVoices(this.packName);
+    } catch (err) {
+      this.voices = [];
+      showToast(err?.message || '读不了这个语音包', { type: 'error', duration: 5000 });
+      return;
+    }
+    for (const voice of this.voices) {
+      voice.hotkey = this.hotkeys[voiceKey(voice.pack, voice.name)] || '';
+    }
+    // 包里的条数是 scanPacks 那一次数出来的，存/删/改名之后得自己补上。
+    const row = this.packs.find((pack) => pack.name === this.packName);
+    if (row) row.voices = this.voices.length;
+    // 正在播的那条可能已经被人在资源管理器里删掉或改名了。
+    const playing = this.voicePlay?.voice;
+    if (playing) {
+      const still = this.voices.find((v) => v.path === playing.path);
+      if (still) this.voicePlay.voice = still;
+      else this.stopVoicePlayback();
+    }
   }
 
   /// 浏览器回退里的「应用音频」用合成演示音源；桌面版用不到，所以按需构建。
@@ -175,23 +219,19 @@ export class App {
   }
 
   currentPack() {
-    return this.packs.find((p) => p.id === this.packId) || null;
+    return this.packs.find((pack) => pack.name === this.packName) || null;
   }
 
   currentVoices() {
-    return this.voicesByPack.get(this.packId) || [];
+    return this.voices;
   }
 
   findAsset(id) {
     return this.assets.find((a) => a.id === id) || null;
   }
 
-  findVoice(id) {
-    for (const voices of this.voicesByPack.values()) {
-      const hit = voices.find((v) => v.id === id);
-      if (hit) return hit;
-    }
-    return null;
+  findVoice(path) {
+    return this.voices.find((voice) => voice.path === path) || null;
   }
 
   visibleAssets() {
@@ -203,9 +243,8 @@ export class App {
 
   visibleVoices() {
     const q = this.voiceSearch.trim().toLowerCase();
-    return [...this.currentVoices()]
-      .filter((voice) => !q || voice.name.toLowerCase().includes(q))
-      .sort((a, b) => a.createdAt - b.createdAt);
+    // 目录本身就是按名字排的：语音板上的顺序 = 文件名顺序，和资源管理器里看到的一致。
+    return this.currentVoices().filter((voice) => !q || voice.name.toLowerCase().includes(q));
   }
 
   isBusy() {
@@ -241,34 +280,19 @@ export class App {
     };
   }
 
-  // 语音是独立个体：自带渲染好的 PCM，素材之后被删除也不影响它。
-  buildVoice({
-    id = uid(), name, buffer, segments = null, gainDb = 0, fadeInMs = 0, fadeOutMs = 0,
-    hotkey = '', createdAt = Date.now(), packId = this.packId,
-  }) {
-    if (!buffer || !buffer.length) throw new Error('音频为空');
-    let renderBuffer = buffer;
-    if (segments) {
-      const clean = normalizeSegments(segments, buffer.length);
-      if (!clean.length) throw new Error('这段音频没有可用内容');
-      renderBuffer = this.engine.renderSegments(buffer, clean);
-    }
-    const duration = renderBuffer.duration;
-    const maxFade = Math.min(5000, Math.floor((duration * 1000) / 2));
-    return {
-      id: uid(),
-      name: String(name || '未命名语音').slice(0, 60),
-      createdAt,
-      packId,
-      renderBuffer,
-      sampleRate: renderBuffer.sampleRate,
-      channels: renderBuffer.numberOfChannels,
-      duration,
-      gainDb: clamp(Number.isFinite(gainDb) ? gainDb : 0, -24, 24),
-      fadeInMs: clamp(Math.round(Number.isFinite(fadeInMs) ? fadeInMs : 0), 0, maxFade),
-      fadeOutMs: clamp(Math.round(Number.isFinite(fadeOutMs) ? fadeOutMs : 0), 0, maxFade),
-      hotkey,
-    };
+  /// 语音就是包文件夹里的一个文件：渲染选好的段落，把增益和淡变烘进采样，编成 24-bit WAV。
+  async renderVoiceWav(asset, segments) {
+    if (!asset.buffer || !asset.buffer.length) throw new Error('音频为空');
+    const clean = normalizeSegments(segments, asset.buffer.length);
+    if (!clean.length) throw new Error('这段音频没有可用内容');
+    const rendered = this.engine.renderSegments(asset.buffer, clean);
+    const blob = audioBufferToWav(rendered, {
+      bitDepth: 24,
+      gainDb: asset.gainDb,
+      fadeInMs: asset.fadeInMs,
+      fadeOutMs: asset.fadeOutMs,
+    });
+    return new Uint8Array(await blob.arrayBuffer());
   }
 
   uniqueAssetName(base) {
@@ -280,13 +304,14 @@ export class App {
     return `${clean} ${n}`.slice(0, 60);
   }
 
-  uniqueVoiceName(base, packId = this.packId) {
-    const names = new Set((this.voicesByPack.get(packId) || []).map((v) => v.name));
-    const clean = String(base || '未命名语音').trim().slice(0, 60) || '未命名语音';
-    if (!names.has(clean)) return clean;
+  /// 重名判定按文件名来（Windows 大小写不敏感），所以这里也按大小写不敏感比。
+  uniqueVoiceName(base, voices = this.voices) {
+    const names = new Set(voices.map((v) => v.name.toLowerCase()));
+    const clean = sanitizeName(base || '未命名语音');
+    if (!names.has(clean.toLowerCase())) return clean;
     let n = 2;
-    while (names.has(`${clean} ${n}`)) n++;
-    return `${clean} ${n}`.slice(0, 60);
+    while (names.has(`${clean} ${n}`.toLowerCase())) n++;
+    return sanitizeName(`${clean} ${n}`);
   }
 
   uniquePackName(base) {
@@ -368,14 +393,14 @@ export class App {
     const select = this.dom.targetPackSelect;
     const options = this.packs.map((pack) => {
       const el = document.createElement('option');
-      el.value = pack.id;
+      el.value = pack.name;
       el.textContent = pack.name;
       return el;
     });
     select.replaceChildren(...options);
-    if (!this.packs.some((p) => p.id === this.packId)) this.packId = this.packs[0]?.id ?? null;
-    select.value = this.packId || '';
-    this.dom.boardPackName.textContent = this.currentPack()?.name || '语音包';
+    if (!this.packs.some((pack) => pack.name === this.packName)) this.packName = this.packs[0]?.name || '';
+    select.value = this.packName;
+    this.dom.boardPackName.textContent = this.packName || '语音包';
     const total = this.currentVoices().length;
     const shown = this.visibleVoices().length;
     this.dom.boardCount.textContent = this.voiceSearch ? `${shown}/${total} 条` : `${total} 条`;
@@ -1035,25 +1060,50 @@ export class App {
    * voice board playback
    * ======================================================= */
 
+  /// 语音文件解码一次就留在对象上，重复点击不再读盘；非 WAV 的时长也是这时才知道。
+  async ensureVoiceBuffer(voice) {
+    if (voice.buffer) return voice.buffer;
+    const bytes = await packStore.read(voice);
+    const buffer = await this.engine.decode(bytes);
+    if (!buffer || !buffer.duration) throw new Error('解码不出音频');
+    voice.buffer = buffer;
+    const wasUnknown = voice.durationMs == null;
+    voice.durationMs = Math.round(buffer.duration * 1000);
+    voice.sampleRate = buffer.sampleRate;
+    voice.channels = buffer.numberOfChannels;
+    if (wasUnknown) this.renderBoard();
+    return buffer;
+  }
+
   async playVoice(voice) {
     if (!voice) return;
-    if (this.voicePlay?.voice.id === voice.id) {
+    if (this.voicePlay?.voice.path === voice.path) {
       this.stopVoicePlayback();
       return;
     }
     this.stopVoicePlayback();
     if (this.isBusy()) return;
 
+    let buffer = null;
+    try {
+      buffer = await this.ensureVoiceBuffer(voice);
+    } catch (err) {
+      showToast(`播不了「${voice.name}」：${err?.message || err}`, { type: 'error', duration: 5000 });
+      return;
+    }
+    const duration = buffer.duration;
+
     if (isNative) {
       try {
-        const pcm = await toNativePcm(voice.renderBuffer, 0, voice.duration);
+        const pcm = await toNativePcm(buffer, 0, duration);
         await invoke('play_pcm', pcm.buffer, {
           headers: {
             'x-sample-rate': '48000',
             'x-channels': '2',
-            'x-gain-db': String(voice.gainDb || 0),
-            'x-fade-in-ms': String(voice.fadeInMs || 0),
-            'x-fade-out-ms': String(voice.fadeOutMs || 0),
+            // 增益和淡变已经烘进文件，这里不再叠加。
+            'x-gain-db': '0',
+            'x-fade-in-ms': '0',
+            'x-fade-out-ms': '0',
             'x-loop': '0',
             'x-device': this.outputId || '',
             'x-start-ms': '0',
@@ -1077,32 +1127,12 @@ export class App {
 
     const ctx = this.engine.ctx;
     const source = ctx.createBufferSource();
-    source.buffer = voice.renderBuffer;
-    const gain = ctx.createGain();
-    source.connect(gain);
-    gain.connect(ctx.destination);
-
-    const now = ctx.currentTime + 0.02;
-    const base = gainForDb(voice.gainDb);
-    const duration = Math.max(0.001, voice.duration);
-    const fadeIn = Math.max(0, voice.fadeInMs) / 1000;
-    const fadeOut = Math.max(0, voice.fadeOutMs) / 1000;
-    gain.gain.cancelScheduledValues(0);
-    if (fadeIn > 0) {
-      gain.gain.setValueAtTime(0, now);
-      gain.gain.linearRampToValueAtTime(base, now + Math.min(fadeIn, duration));
-    } else {
-      gain.gain.setValueAtTime(base, now);
-    }
-    if (fadeOut > 0) {
-      const fadeStart = now + Math.max(fadeIn, duration - fadeOut);
-      gain.gain.setValueAtTime(base, fadeStart);
-      gain.gain.linearRampToValueAtTime(0, now + duration);
-    }
-    source.start(now);
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    source.start(ctx.currentTime + 0.02);
 
     const token = ++this.voicePlayToken;
-    this.voicePlay = { voice, source, gain, token };
+    this.voicePlay = { voice, source, token };
     source.onended = () => {
       if (this.voicePlay?.token === token) this.stopVoicePlayback();
     };
@@ -1157,9 +1187,9 @@ export class App {
   }
 
   updateVoicePlayingUI() {
-    const playingId = this.voicePlay?.voice.id || null;
+    const playingPath = this.voicePlay?.voice.path || null;
     for (const tile of this.dom.voiceGrid.querySelectorAll('.voice-tile')) {
-      const on = tile.dataset.voiceId === playingId;
+      const on = tile.dataset.voicePath === playingPath;
       tile.classList.toggle('is-playing', on);
       tile.setAttribute('aria-label', on ? `${tile.dataset.name}，正在播放` : tile.dataset.name);
     }
@@ -1209,7 +1239,7 @@ export class App {
   buildVoiceTile(voice) {
     const tile = document.createElement('div');
     tile.className = 'voice-tile';
-    tile.dataset.voiceId = voice.id;
+    tile.dataset.voicePath = voice.path;
     tile.dataset.name = voice.name;
     tile.tabIndex = 0;
     tile.setAttribute('role', 'option');
@@ -1237,7 +1267,9 @@ export class App {
     meta.className = 'voice-meta';
     const dur = document.createElement('span');
     dur.className = 'voice-duration';
-    dur.textContent = `${fmtShort(voice.duration)} · ${fmtRate(voice.sampleRate)}`;
+    dur.textContent = voice.durationMs
+      ? `${fmtShort(voice.durationMs / 1000)} · ${fmtRate(voice.sampleRate || 48000)}`
+      : `${(voice.size / 1024).toFixed(0)} KB`;
     meta.appendChild(dur);
     if (voice.hotkey) {
       const chip = document.createElement('span');
@@ -1267,8 +1299,8 @@ export class App {
   async saveVoiceFromAsset({ assetId = null, selectionOnly = false } = {}) {
     const asset = this.findAsset(assetId) || this.asset;
     if (!asset || this.isBusy()) return;
-    const packId = this.packId || this.packs[0]?.id;
-    if (!packId) {
+    const pack = this.packName || this.packs[0]?.name;
+    if (!pack) {
       showToast('还没有语音包', { type: 'error' });
       return;
     }
@@ -1290,42 +1322,32 @@ export class App {
     }
 
     // 命名放在保存这一刻：省掉"先落一个默认名、再去语音板里找出来改名"的往返。
-    const siblings = this.voicesByPack.get(packId) || [];
     const name = await promptDialog({
       title: selectionOnly ? '保存选区为语音' : '保存整段为语音',
       label: '名称',
-      value: this.uniqueVoiceName(asset.name, packId),
+      value: this.uniqueVoiceName(asset.name),
+      hint: `保存为「${pack}」文件夹里的一个 WAV，文件名就是这个名字；增益和淡变会烘进音频。`,
       confirmLabel: '保存',
       validate: (v) => (!v
         ? '名称不能为空'
-        : (siblings.some((x) => x.name.toLowerCase() === v.toLowerCase()) ? '这个语音包里已有同名语音' : '')),
+        : (this.voices.some((x) => x.name.toLowerCase() === sanitizeName(v).toLowerCase())
+          ? '这个包里已经有同名语音' : '')),
     });
     if (!name) return;
 
-    let voice;
+    const file = voiceFile(name);
     try {
-      voice = this.buildVoice({
-        name,
-        buffer: asset.buffer,
-        segments,
-        gainDb: asset.gainDb,
-        fadeInMs: asset.fadeInMs,
-        fadeOutMs: asset.fadeOutMs,
-        createdAt: Date.now(),
-        packId,
-      });
+      const bytes = await this.renderVoiceWav(asset, segments);
+      await packStore.write(`${pack}/${file}`, bytes);
     } catch (err) {
-      showToast(err.message || '无法生成语音', { type: 'error' });
+      showToast(`保存失败：${err.message || err}`, { type: 'error', duration: 6000 });
       return;
     }
-
-    if (!this.voicesByPack.has(packId)) this.voicesByPack.set(packId, []);
-    this.voicesByPack.get(packId).push(voice);
-    const packName = this.packs.find((p) => p.id === packId)?.name || '语音包';
+    await this.scanVoices();
     this.renderTargetPacks();
     this.renderBoard();
     this.updateControls();
-    showToast(`已保存「${voice.name}」到「${packName}」`, {
+    showToast(`已保存「${sanitizeName(name)}」到「${pack}」`, {
       action: { label: '去语音板', onClick: () => this.setView('board') },
     });
   }
@@ -1337,56 +1359,89 @@ export class App {
       label: '名称',
       value: voice.name,
       confirmLabel: '保存',
-      validate: (v) => {
-        if (!v) return '名称不能为空';
-        const clash = this.currentVoices().some((x) => x.id !== voice.id && x.name.toLowerCase() === v.toLowerCase());
-        return clash ? '这个语音包里已有同名语音' : '';
-      },
+      validate: (v) => (!v
+        ? '名称不能为空'
+        : (this.voices.some((x) => x !== voice && x.name.toLowerCase() === sanitizeName(v).toLowerCase())
+          ? '这个包里已经有同名语音' : '')),
     });
-    if (!name || name === voice.name) return;
-    voice.name = name.slice(0, 60);
-    if (this.voicePlay?.voice.id === voice.id) {
-      this.voicePlay.voice = voice;
+    if (!name) return;
+    const target = `${voice.pack}/${voiceFile(name)}`;
+    if (target === voice.path) return;
+    try {
+      await packStore.move(voice.path, target);
+    } catch (err) {
+      showToast(`重命名失败：${err.message || err}`, { type: 'error', duration: 6000 });
+      return;
     }
+    const from = voiceKey(voice.pack, voice.name);
+    const to = voiceKey(voice.pack, sanitizeName(name));
+    if (this.hotkeys[from] && from !== to) {
+      this.hotkeys[to] = this.hotkeys[from];
+      delete this.hotkeys[from];
+    }
+    await this.scanVoices();
     this.renderBoard();
   }
 
   checkVoiceHotkey(voice, combo) {
     if (!combo) return '';
     if (RESERVED_HOTKEYS.has(combo)) return '该组合已用于界面操作，请换一个';
-    const conflict = this.currentVoices().find((v) => v.id !== voice.id && v.hotkey === combo);
+    const conflict = this.voices.find((v) => v.path !== voice.path && v.hotkey === combo);
     if (conflict) return `快捷键已被「${conflict.name}」使用`;
     return '';
   }
 
   setVoiceHotkey(voice, combo) {
     if (!voice) return;
+    const key = voiceKey(voice.pack, voice.name);
+    if (combo) this.hotkeys[key] = combo;
+    else delete this.hotkeys[key];
     voice.hotkey = combo || '';
     this.renderBoard();
   }
 
-  deleteVoice(voice) {
+  /// 删语音就是删文件。撤销靠内存里那份字节，6 秒内写回同名文件。
+  async deleteVoice(voice) {
     if (!voice || this.isBusy()) return;
-    const voices = this.voicesByPack.get(voice.packId);
-    const index = voices?.indexOf(voice) ?? -1;
-    if (!voices || index < 0) return;
-    if (this.voicePlay?.voice.id === voice.id) this.stopVoicePlayback();
-    voices.splice(index, 1);
+    if (!this.voices.includes(voice)) return;
+    let bytes = null;
+    try {
+      bytes = new Uint8Array(await packStore.read(voice));
+    } catch {
+      bytes = null;
+    }
+    if (this.voicePlay?.voice.path === voice.path) this.stopVoicePlayback();
+    try {
+      await packStore.remove(voice.path);
+    } catch (err) {
+      showToast(`删除失败：${err.message || err}`, { type: 'error', duration: 6000 });
+      return;
+    }
+    const key = voiceKey(voice.pack, voice.name);
+    const bound = this.hotkeys[key] || '';
+    delete this.hotkeys[key];
+    await this.scanVoices();
     this.renderTargetPacks();
     this.renderBoard();
     this.updateControls();
     showToast(`已删除语音「${voice.name}」`, {
       duration: 6000,
-      action: {
+      action: bytes ? {
         label: '撤销',
-        onClick: () => {
-          const arr = this.voicesByPack.get(voice.packId);
-          if (!arr || arr.includes(voice)) return;
-          arr.splice(Math.min(index, arr.length), 0, voice);
+        onClick: async () => {
+          if (this.voices.some((v) => v.path === voice.path)) return;
+          try {
+            await packStore.write(voice.path, bytes);
+          } catch (err) {
+            showToast(`恢复失败：${err.message || err}`, { type: 'error', duration: 6000 });
+            return;
+          }
+          if (bound) this.hotkeys[key] = bound;
+          await this.scanVoices();
           this.renderTargetPacks();
           this.renderBoard();
         },
-      },
+      } : undefined,
     });
   }
 
@@ -1887,21 +1942,116 @@ export class App {
    * pack management
    * ======================================================= */
 
-  setPack(id) {
-    if (!this.packs.some((p) => p.id === id)) return;
-    if (id === this.packId) return;
-    this.packId = id;
+  setPack(name) {
+    if (!this.packs.some((pack) => pack.name === name) || name === this.packName) return;
+    this.packName = name;
+    this.scanVoices().then(() => {
+      this.renderTargetPacks();
+      this.renderBoard();
+      this.updateControls();
+    });
+  }
+
+  switchPack(name) {
+    if (this.isBusy()) {
+      showToast('正在录制或处理，稍后再切换语音包', { type: 'error' });
+      return;
+    }
+    this.setPack(name);
+  }
+
+  /// 语音包是目录，人在资源管理器里改完，回到窗口就该看见。
+  async refreshPacks() {
+    if (!this._initialized) return;
+    const ok = await this.scanPacks();
+    if (!ok) return;
     this.renderTargetPacks();
     this.renderBoard();
     this.updateControls();
   }
 
-  switchPack(id) {
-    if (this.isBusy()) {
-      showToast('正在录制或处理，稍后再切换语音包', { type: 'error' });
-      return;
+  /// 在资源管理器里打开当前包（没有当前包时打开根目录）。
+  async revealPack() {
+    try {
+      await packStore.reveal(this.packName ? `${this.packName}/` : null);
+    } catch (err) {
+      showToast(err?.message || '打不开目录', { type: 'error', duration: 5000 });
     }
-    this.setPack(id);
+  }
+
+  async revealVoice(voice) {
+    if (!voice) return;
+    try {
+      await packStore.reveal(voice.path);
+    } catch (err) {
+      showToast(err?.message || '打不开目录', { type: 'error', duration: 5000 });
+    }
+  }
+
+  /// 浏览器回退没有目录可打开，把文件本身下下来就是出口。
+  async downloadVoice(voice) {
+    if (!voice) return;
+    try {
+      const bytes = await packStore.read(voice);
+      downloadBlob(new Blob([bytes], { type: 'audio/wav' }), voice.file);
+    } catch (err) {
+      showToast(`读不了这个文件：${err?.message || err}`, { type: 'error', duration: 5000 });
+    }
+  }
+
+  /// 根目录是设置，不是包内容：换目录后整个语音板就是另一个库了，所以先确认。
+  async choosePackRoot() {
+    const info = await packStore.rootInfo().catch(() => ({ root: '', defaultRoot: '' }));
+    const path = await promptDialog({
+      title: '语音包根目录',
+      label: '路径',
+      value: info.root,
+      hint: '根目录下每个文件夹是一个语音包。换到这里后，语音板显示这个目录里的内容；原目录的文件不会被移动。',
+      confirmLabel: '切换',
+      validate: (v) => (!v ? '路径不能为空' : (!/^[a-zA-Z]:[\\/]/.test(v) ? '请填写完整路径，比如 D:\\语音包' : '')),
+    });
+    if (!path || path === info.root) return;
+    try {
+      const applied = await packStore.setRoot(path);
+      this.packName = '';
+      await this.scanPacks();
+      this.renderTargetPacks();
+      this.renderBoard();
+      this.updateControls();
+      showToast(`语音包根目录已切到 ${applied}`, { duration: 5000 });
+    } catch (err) {
+      showToast(`切换失败：${err.message || err}`, { type: 'error', duration: 6000 });
+    }
+  }
+
+  /// 换包 = 把文件挪到另一个文件夹。
+  moveVoiceToPack(voice, anchor) {
+    if (!voice || this.isBusy()) return;
+    const others = this.packs.filter((pack) => pack.name !== voice.pack);
+    if (!others.length) return;
+    openMenu(anchor || this.dom.boardPackBtn, others.map((pack) => ({
+      label: pack.name,
+      icon: 'folder',
+      onClick: async () => {
+        try {
+          await packStore.move(voice.path, `${pack.name}/${voice.file}`);
+        } catch (err) {
+          showToast(`移动失败：${err.message || err}`, { type: 'error', duration: 6000 });
+          return;
+        }
+        const from = voiceKey(voice.pack, voice.name);
+        const to = voiceKey(pack.name, voice.name);
+        if (this.hotkeys[from]) {
+          this.hotkeys[to] = this.hotkeys[from];
+          delete this.hotkeys[from];
+        }
+        if (this.voicePlay?.voice.path === voice.path) this.stopVoicePlayback();
+        await this.scanPacks();
+        this.renderTargetPacks();
+        this.renderBoard();
+        showToast(`已把「${voice.name}」移到「${pack.name}」`);
+      },
+    })));
   }
 
   async newPack() {
@@ -1911,22 +2061,26 @@ export class App {
       label: '名称',
       value: `语音包 ${this.packs.length + 1}`,
       placeholder: '例如：游戏语音',
+      hint: '在语音包根目录下新建一个同名文件夹。',
       confirmLabel: '创建',
-      validate: (v) => {
-        if (!v) return '名称不能为空';
-        if (this.packs.some((p) => p.name.toLowerCase() === v.toLowerCase())) return '已有同名语音包';
-        return '';
-      },
+      validate: (v) => (!v
+        ? '名称不能为空'
+        : (this.packs.some((p) => p.name.toLowerCase() === sanitizeName(v).toLowerCase()) ? '已有同名语音包' : '')),
     });
     if (!name) return;
-    const pack = { id: uid(), name, createdAt: Date.now() };
-    this.packs.push(pack);
-    this.voicesByPack.set(pack.id, []);
-    this.packId = pack.id;
+    try {
+      await packStore.createPack(name);
+    } catch (err) {
+      showToast(`建不了语音包：${err.message || err}`, { type: 'error', duration: 6000 });
+      return;
+    }
+    await this.scanPacks();
+    this.packName = sanitizeName(name);
+    await this.scanVoices();
     this.renderTargetPacks();
     this.renderBoard();
     this.updateControls();
-    showToast(`已创建「${name}」`);
+    showToast(`已创建「${this.packName}」`);
   }
 
   async renameCurrentPack() {
@@ -1937,32 +2091,48 @@ export class App {
       label: '名称',
       value: pack.name,
       confirmLabel: '保存',
-      validate: (v) => {
-        if (!v) return '名称不能为空';
-        if (this.packs.some((p) => p.id !== pack.id && p.name.toLowerCase() === v.toLowerCase())) return '已有同名语音包';
-        return '';
-      },
+      validate: (v) => (!v
+        ? '名称不能为空'
+        : (this.packs.some((p) => p.name !== pack.name && p.name.toLowerCase() === sanitizeName(v).toLowerCase())
+          ? '已有同名语音包' : '')),
     });
-    if (!name || name === pack.name) return;
-    pack.name = name;
+    if (!name) return;
+    try {
+      await packStore.renamePack(pack.name, name);
+    } catch (err) {
+      showToast(`重命名失败：${err.message || err}`, { type: 'error', duration: 6000 });
+      return;
+    }
+    // 热键按「包名/语音名」记，包改名后整段前缀搬过去。
+    const from = `${pack.name}/`;
+    const to = `${sanitizeName(name)}/`;
+    for (const key of Object.keys(this.hotkeys)) {
+      if (key.startsWith(from)) {
+        this.hotkeys[to + key.slice(from.length)] = this.hotkeys[key];
+        delete this.hotkeys[key];
+      }
+    }
+    this.packName = to.slice(0, -1);
+    await this.scanPacks();
     this.renderTargetPacks();
+    this.renderBoard();
   }
 
-  /// 「清空整个会话」：内存和本机副本一起回到刚装好的样子。没有撤销，所以先确认。
+  /// 「清空整个会话」只清素材和热键：语音包是用户目录里的文件，不该由这个动作删掉。
   async clearSession() {
     if (this.isBusy()) {
       showToast('正在录制或处理，稍后再试', { type: 'error' });
       return;
     }
     const assets = this.assets.length;
-    const voices = [...this.voicesByPack.values()].reduce((sum, list) => sum + list.length, 0);
-    if (!assets && !voices) {
+    const bound = Object.keys(this.hotkeys).length;
+    if (!assets && !bound) {
       showToast('当前会话已经是空的');
       return;
     }
     const ok = await confirmDialog({
       title: '清空整个会话',
-      message: `将删除 ${assets} 段素材和 ${voices} 条语音，连同本机已保存的副本。这一步不能撤销。`,
+      message: `将删除 ${assets} 段素材和 ${bound} 个热键绑定，连同本机已保存的副本。语音包文件夹里的音频不动。这一步不能撤销。`,
       confirmLabel: '清空',
       danger: true,
     });
@@ -1973,10 +2143,8 @@ export class App {
     this.selectedAssetId = null;
     this.waveAsset = null;
     this.history = new Map();
-    const pack = { id: uid(), name: '默认语音包', createdAt: Date.now() };
-    this.packs = [pack];
-    this.packId = pack.id;
-    this.voicesByPack = new Map([[pack.id, []]]);
+    this.hotkeys = {};
+    for (const voice of this.voices) voice.hotkey = '';
     try {
       await this.session.clear();
     } catch (err) {
@@ -1990,12 +2158,6 @@ export class App {
     showToast('会话已清空');
   }
 
-  pickPackFile() {
-    if (this.isBusy()) return;
-    this.dom.packInput.value = '';
-    this.dom.packInput.click();
-  }
-
   async deleteCurrentPack() {
     const pack = this.currentPack();
     if (!pack || this.isBusy()) {
@@ -2006,39 +2168,31 @@ export class App {
       showToast('至少保留一个语音包');
       return;
     }
-    const voices = this.currentVoices();
     const ok = await confirmDialog({
       title: '删除语音包',
-      message: `将删除「${pack.name}」和其中的 ${voices.length} 条语音（素材本身保留）。此操作在 6 秒内可撤销。`,
+      message: pack.voices
+        ? `将删除文件夹「${pack.name}」和里面的 ${pack.voices} 条语音。这一步不能撤销。`
+        : `将删除空文件夹「${pack.name}」。`,
       confirmLabel: '删除',
       danger: true,
     });
     if (!ok) return;
-    const index = this.packs.indexOf(pack);
-    this.packs.splice(index, 1);
-    this.voicesByPack.delete(pack.id);
-    if (this.voicePlay && voices.includes(this.voicePlay.voice)) this.stopVoicePlayback();
-    const next = this.packs[Math.min(index, this.packs.length - 1)];
-    this.packId = next?.id ?? null;
+    if (this.voicePlay?.voice.pack === pack.name) this.stopVoicePlayback();
+    try {
+      await packStore.deletePack(pack.name, true);
+    } catch (err) {
+      showToast(`删除失败：${err.message || err}`, { type: 'error', duration: 6000 });
+      return;
+    }
+    for (const key of Object.keys(this.hotkeys)) {
+      if (key.startsWith(`${pack.name}/`)) delete this.hotkeys[key];
+    }
+    this.packName = '';
+    await this.scanPacks();
     this.renderTargetPacks();
     this.renderBoard();
-    this.updateRowState();
     this.updateControls();
-    showToast(`已删除「${pack.name}」`, {
-      duration: 6000,
-      action: {
-        label: '撤销',
-        onClick: () => {
-          if (this.packs.some((p) => p.id === pack.id)) return;
-          this.packs.splice(Math.min(index, this.packs.length), 0, pack);
-          this.voicesByPack.set(pack.id, voices);
-          this.packId = pack.id;
-          this.renderTargetPacks();
-          this.renderBoard();
-          this.updateRowState();
-        },
-      },
-    });
+    showToast(`已删除「${pack.name}」`);
   }
 
   /* =========================================================
@@ -2082,101 +2236,6 @@ export class App {
     this.updateControls();
   }
 
-  async importPackFile(file) {
-    if (this.isBusy()) {
-      showToast('正在录制或处理，稍后再导入', { type: 'error' });
-      return;
-    }
-    this._busyImporting = true;
-    this.updateControls();
-    const close = showToast('正在导入语音包…', { duration: 30000 });
-    let pack = null;
-    try {
-      const bytes = await file.arrayBuffer();
-      const entries = await readZip(bytes);
-      const manifestBytes = entries.get('manifest.json');
-      if (!manifestBytes) throw new Error('语音包里没有 manifest.json');
-      let manifest;
-      try {
-        manifest = JSON.parse(new TextDecoder().decode(manifestBytes));
-      } catch {
-        throw new Error('manifest.json 无法解析');
-      }
-      if (Number(manifest.schemaVersion) !== 3 || manifest.kind !== 'voicepack') {
-        throw new Error('不是当前版本的语音包格式');
-      }
-      const voiceList = manifest.voices;
-      if (!Array.isArray(voiceList) || !voiceList.length) throw new Error('语音包里没有语音');
-
-      const readSource = async (path) => {
-        const raw = entries.get(path);
-        if (!raw) throw new Error('缺少源音频');
-        return this.engine.decode(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
-      };
-
-      pack = {
-        id: uid(),
-        name: this.uniquePackName(manifest.name || file.name.replace(/\.[^.]+$/, '')),
-        createdAt: Date.now(),
-      };
-      const voices = [];
-      const usedHotkeys = new Set();
-      let failed = 0;
-      let order = 0;
-
-      for (const entry of voiceList) {
-        try {
-          const buffer = await readSource(entry.sourceFile);
-          const voice = this.buildVoice({
-            name: String(entry.name || '导入语音').slice(0, 60),
-            buffer,
-            gainDb: Number(entry.gainDb) || 0,
-            fadeInMs: Number(entry.fadeInMs) || 0,
-            fadeOutMs: Number(entry.fadeOutMs) || 0,
-            createdAt: Date.now() + order++,
-            packId: pack.id,
-          });
-          let hotkey = typeof entry.hotkey === 'string' ? entry.hotkey : '';
-          if (hotkey && (usedHotkeys.has(hotkey) || RESERVED_HOTKEYS.has(hotkey))) hotkey = '';
-          if (hotkey) usedHotkeys.add(hotkey);
-          voice.hotkey = hotkey;
-          voices.push(voice);
-        } catch (err) {
-          failed++;
-          console.warn('voicepack import voice failed', err);
-        }
-      }
-
-      if (!voices.length) throw new Error('没有可导入的语音');
-      this.packs.push(pack);
-      this.voicesByPack.set(pack.id, voices);
-      this.packId = pack.id;
-      this._busyImporting = false;
-      close();
-      this.renderTargetPacks();
-      this.renderAssetList();
-      this.renderBoard();
-      this.setView('board');
-      showToast(failed
-        ? `已导入 ${voices.length} 条语音，${failed} 条失败`
-        : `已导入语音包「${pack.name}」（${voices.length} 条语音）`);
-      this.updateControls();
-    } catch (err) {
-      if (pack) {
-        this.voicesByPack.delete(pack.id);
-        const index = this.packs.indexOf(pack);
-        if (index >= 0) this.packs.splice(index, 1);
-      }
-      if (!this.packs.some((p) => p.id === this.packId)) this.packId = this.packs[0]?.id ?? null;
-      this._busyImporting = false;
-      close();
-      this.renderTargetPacks();
-      this.renderBoard();
-      showToast(`导入失败：${err.message || '文件不可用'}`, { type: 'error', duration: 6000 });
-      this.updateControls();
-    }
-  }
-
   async handleFiles(fileList) {
     const files = Array.from(fileList || []);
     if (!files.length) return;
@@ -2184,76 +2243,15 @@ export class App {
       showToast('正在录制或处理，稍后再导入', { type: 'error' });
       return;
     }
-    const packFiles = files.filter((f) => /\.(zip|voicepack)$/i.test(f.name) || f.type === 'application/zip');
     const audioFiles = files.filter((f) => (
       f.type.startsWith('audio/')
       || /\.(wav|mp3|flac|ogg|oga|m4a|aac|webm|opus)$/i.test(f.name)
     ));
-    if (!packFiles.length && !audioFiles.length) {
-      showToast('没有可导入的音频或语音包', { type: 'error' });
+    if (!audioFiles.length) {
+      showToast('没有可导入的音频文件', { type: 'error' });
       return;
     }
-    for (const file of packFiles) {
-      await this.importPackFile(file);
-    }
-    if (audioFiles.length) await this.importAudioFiles(audioFiles);
-  }
-
-  async exportPack() {
-    if (this.isBusy()) return;
-    const pack = this.currentPack();
-    const voices = this.currentVoices();
-    if (!pack || !voices.length) {
-      showToast('当前语音包还没有语音', { type: 'error' });
-      return;
-    }
-    this._busyExporting = true;
-    this.updateControls();
-    const close = showToast('正在打包语音包…', { duration: 30000 });
-    try {
-      const files = [];
-      const voiceEntries = [];
-      let order = 0;
-      for (const voice of voices) {
-        const blob = audioBufferToWav(voice.renderBuffer, { bitDepth: 24 });
-        const data = new Uint8Array(await blob.arrayBuffer());
-        const sourceFile = `voices/${String(order++).padStart(3, '0')}.wav`;
-        files.push({ name: sourceFile, data });
-        voiceEntries.push({
-          id: voice.id,
-          name: voice.name,
-          sourceFile,
-          hotkey: voice.hotkey,
-          gainDb: voice.gainDb,
-          fadeInMs: voice.fadeInMs,
-          fadeOutMs: voice.fadeOutMs,
-          durationMs: Math.round(voice.duration * 1000),
-          sampleRate: voice.sampleRate,
-          channels: voice.channels,
-        });
-      }
-
-      const manifest = {
-        schemaVersion: 3,
-        kind: 'voicepack',
-        name: pack.name,
-        exportedAt: new Date().toISOString(),
-        voices: voiceEntries,
-      };
-      files.unshift({
-        name: 'manifest.json',
-        data: new TextEncoder().encode(JSON.stringify(manifest, null, 2)),
-      });
-      downloadBlob(createZip(files), `${sanitizeFilename(pack.name)}.voicepack.zip`);
-      close();
-      showToast('语音包已下载');
-    } catch (err) {
-      close();
-      showToast(`导出失败：${err.message || '未知错误'}`, { type: 'error', duration: 6000 });
-    } finally {
-      this._busyExporting = false;
-      this.updateControls();
-    }
+    await this.importAudioFiles(audioFiles);
   }
 
   async exportCurrentAsset() {
@@ -2447,12 +2445,6 @@ export class App {
       this.dom.fileInput.value = '';
       if (files.length) this.handleFiles(files);
     });
-    this.dom.packInput.addEventListener('change', () => {
-      const file = this.dom.packInput.files?.[0];
-      this.dom.packInput.value = '';
-      if (file) this.importPackFile(file);
-    });
-
     this.dom.sourceSeg.addEventListener('click', (event) => {
       const btn = event.target.closest('.seg-btn');
       if (!btn || this.isBusy() || this.recording.active) return;
@@ -2603,7 +2595,7 @@ export class App {
     this.dom.voiceGrid.addEventListener('click', (event) => {
       const tile = event.target.closest('.voice-tile');
       if (!tile) return;
-      const voice = this.findVoice(tile.dataset.voiceId);
+      const voice = this.findVoice(tile.dataset.voicePath);
       if (!voice) return;
       if (event.target.closest('[data-action="more"]')) {
         openVoiceMenu(this, voice, event.target.closest('[data-action="more"]'));
@@ -2621,7 +2613,7 @@ export class App {
       if (event.key === 'Enter' || event.key === ' ') {
         if (index < 0) return;
         event.preventDefault();
-        const voice = this.findVoice(tiles[index].dataset.voiceId);
+        const voice = this.findVoice(tiles[index].dataset.voicePath);
         if (voice) {
           this.stopPlayback({ reset: true });
           this.playVoice(voice);
@@ -2667,6 +2659,15 @@ export class App {
         this._listRaf = 0;
         if (this.view === 'edit') this.renderVisibleAssetRows();
       });
+    });
+    // 语音包是目录：在资源管理器里改完，回到窗口就重新扫一遍。弹窗或菜单开着时不动，免得打断操作。
+    const rescan = () => {
+      if (document.querySelector('.modal-backdrop') || document.querySelector('.menu')) return;
+      this.refreshPacks();
+    };
+    addEventListener('focus', rescan);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) rescan();
     });
     window.addEventListener('beforeunload', (event) => {
       if (this.recording.active || this.recording.preparing) {

@@ -216,21 +216,22 @@ export function openAbout(app) {
   const summary = document.createElement('div');
   summary.className = 'summary';
   summary.textContent = isNative
-    ? '素材和语音改完就存，不需要手动保存，也不会因为关掉软件而丢失。全部留在本机，不联网、不上传。'
-    : '浏览器回退不落盘：关掉页面就清空，要留下内容请用「导出语音包」。';
+    ? '一条语音就是语音包文件夹里的一个音频文件，保存即写入；素材和热键实时存在本机。全部不联网、不上传。'
+    : '浏览器回退不落盘：关掉页面就清空，语音只在这一次会话里存在。';
   body.appendChild(summary);
 
   const where = document.createElement('p');
   where.className = 'hint';
   body.appendChild(where);
   if (isNative) {
-    invoke('session_stats').then((stats) => {
-      where.textContent = `保存位置：${stats.dir} · ${stats.blobs} 段音频 · ${(stats.bytes / 1048576).toFixed(1)} MB`;
+    Promise.all([invoke('pack_root_info'), invoke('session_stats')]).then(([root, stats]) => {
+      where.style.whiteSpace = 'pre-line';
+      where.textContent = `语音包目录：${root.root}\n素材与设置：${stats.dir}（${stats.blobs} 段音频 · ${(stats.bytes / 1048576).toFixed(1)} MB）`;
     }).catch(() => {});
   }
 
   const model = document.createElement('p');
-  model.textContent = '素材是原始录音或导入音频；编辑素材不会改母带。把整段或选区保存为语音后，这条语音就成为独立个体，和素材再无关联，之后删素材也不影响它；语音包只负责把语音分组。导出/导入语音包是给人用的分发格式（zip，每条语音一个 WAV），与自己的备份无关。';
+  model.textContent = '素材是原始录音或导入音频；编辑素材不会改母带。保存为语音时，选好的段落连同增益和淡变一起烘进一个新的 WAV 写进包文件夹，文件名就是语音名——所以删素材不影响它，在资源管理器里增删改名也一样能读回来。热键是界面绑定，只记在本机，不跟着文件走。';
   body.appendChild(model);
 
   return openModal({
@@ -241,22 +242,21 @@ export function openAbout(app) {
 }
 
 export function openPackMenu(app, anchor) {
-  const hasVoices = app.currentVoices().length > 0;
-  const isEmpty = !app.assets.length && [...app.voicesByPack.values()].every((list) => !list.length);
+  const isEmpty = !app.assets.length && !Object.keys(app.hotkeys).length;
   const packs = app.packs.map((pack) => ({
     label: pack.name,
-    icon: pack.id === app.packId ? 'check' : 'folder',
-    shortcut: `${(app.voicesByPack.get(pack.id) || []).length} 条`,
-    onClick: () => app.switchPack(pack.id),
+    icon: pack.name === app.packName ? 'check' : 'folder',
+    shortcut: `${pack.voices} 条`,
+    onClick: () => app.switchPack(pack.name),
   }));
   return openMenu(anchor, [
     ...packs,
     { separator: true },
     { label: '新建语音包', icon: 'plus', onClick: () => app.newPack() },
     { label: '重命名当前语音包', icon: 'rename', onClick: () => app.renameCurrentPack() },
-    { separator: true },
-    { label: '导入语音包…', icon: 'upload', onClick: () => app.pickPackFile() },
-    { label: '导出当前语音包…', icon: 'download', disabled: !hasVoices || app.isBusy(), onClick: () => app.exportPack() },
+    { label: '刷新目录', onClick: () => app.refreshPacks() },
+    { label: '在资源管理器里打开', icon: 'folder', onClick: () => app.revealPack() },
+    { label: '语音包根目录…', icon: 'gear', onClick: () => app.choosePackRoot() },
     { separator: true },
     { label: '删除当前语音包', icon: 'trash', danger: true, disabled: app.packs.length <= 1 || app.isBusy(), onClick: () => app.deleteCurrentPack() },
     { label: '清空整个会话…', icon: 'trash', danger: true, disabled: isEmpty || app.isBusy(), onClick: () => app.clearSession() },
@@ -277,7 +277,10 @@ export function openVoiceMenu(app, voice, anchor) {
   return openMenu(anchor, [
     { label: '重命名…', icon: 'rename', onClick: () => app.renameVoice(voice) },
     { label: '设置热键…', icon: 'keyboard', shortcut: voice.hotkey || '未设置', onClick: () => openVoiceHotkeyDialog(app, voice) },
-    { label: '导出音频…', icon: 'download', disabled: app.isBusy(), onClick: () => openExportClipDialog(app, voice) },
+    { label: '移到其它包…', icon: 'folder', disabled: app.packs.length <= 1 || app.isBusy(), onClick: () => app.moveVoiceToPack(voice, anchor) },
+    isNative
+      ? { label: '在资源管理器里显示', icon: 'folder', onClick: () => app.revealVoice(voice) }
+      : { label: '下载这个文件', icon: 'download', onClick: () => app.downloadVoice(voice) },
     { separator: true },
     { label: '删除语音', icon: 'trash', danger: true, disabled: app.isBusy(), onClick: () => app.deleteVoice(voice) },
   ]);

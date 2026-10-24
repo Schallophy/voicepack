@@ -1,4 +1,5 @@
 mod audio;
+mod packs;
 mod store;
 
 use audio::AudioCore;
@@ -42,6 +43,18 @@ pub fn run() {
             store::read_blob,
             store::session_stats,
             store::clear_session,
+            packs::pack_root_info,
+            packs::set_pack_root,
+            packs::list_packs,
+            packs::list_pack_voices,
+            packs::read_voice_file,
+            packs::write_voice_file,
+            packs::move_voice_file,
+            packs::delete_voice_file,
+            packs::create_pack,
+            packs::rename_pack,
+            packs::delete_pack,
+            packs::reveal_in_explorer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
